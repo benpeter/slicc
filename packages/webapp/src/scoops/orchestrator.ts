@@ -29,6 +29,7 @@ import { isExternalLickChannel } from './lick-formatting.js';
 import { buildActiveLicksError, type LickManager } from './lick-manager.js';
 import { TaskScheduler } from './scheduler.js';
 import { ScoopContext, type ScoopContextCallbacks } from './scoop-context.js';
+import { emitScoopLifecycle } from './scoop-telemetry-hook.js';
 import { createDefaultSharedFiles, createDefaultSkills } from './skills.js';
 import {
   type ChannelMessage,
@@ -756,6 +757,12 @@ export class Orchestrator {
     const responseText = this.scoopResponseBuffer.get(jid);
     this.scoopResponseBuffer.delete(jid);
     if (!responseText) return;
+
+    // Emit completion telemetry before the notify-policy / mute / waiter
+    // branches: a scoop that produced output has lifecycle-completed
+    // regardless of how (or whether) the cone is told about it.
+    emitScoopLifecycle('complete', scoop.folder);
+
     if (scoop.notifyOnComplete === false) return;
 
     // Fire any pending scoop_wait resolvers first. A waiter claims the
@@ -1371,6 +1378,10 @@ export class Orchestrator {
     log.info('Scoop registered', { jid: scoop.jid, name: scoop.name });
     try {
       await this.createScoopTab(scoop.jid);
+      // Cones are tracked separately via boot-time `createScoopTab`
+      // (not `registerScoop`), so this only fires for runtime-spawned
+      // sub-scoops — which is what "delegation activity" cares about.
+      if (!scoop.isCone) emitScoopLifecycle('spawn', scoop.folder);
     } catch (err) {
       log.error('Scoop init failed', {
         jid: scoop.jid,
@@ -1618,6 +1629,8 @@ export class Orchestrator {
     const scoop = this.scoops.get(scoopJid);
     if (!scoop) throw new Error(`Scoop not found: ${scoopJid}`);
 
+    emitScoopLifecycle('feed', scoop.folder);
+
     // Save as a channel message so it shows up in history
     const msg: ChannelMessage = {
       id: `delegate-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -1831,6 +1844,7 @@ export class Orchestrator {
           tab.error = error;
           this.tabs.set(jid, tab);
         }
+        emitScoopLifecycle('error', scoop.folder, error);
         this.callbacks.onError(jid, error);
         this.callbacks.onStatusChange(jid, 'error');
         this.dispatchScoopEvent(jid, 'onError', error);
@@ -1923,6 +1937,8 @@ export class Orchestrator {
 
     const scoopRecord = this.scoops.get(jid)!;
     log.error('Fatal scoop error', { jid, folder: scoopRecord.folder, error });
+
+    emitScoopLifecycle('error', scoopRecord.folder, error);
 
     const tab = this.tabs.get(jid);
     if (tab) {
